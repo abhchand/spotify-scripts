@@ -26,6 +26,75 @@
 # https://developer.spotify.com/documentation/general/guides/app-settings/#register-your-app
 #
 
+CREDS_FILE="spotify.creds"
+
+# A dead simple json parser that takes two arguments
+#   1. JSON to be parsed
+#   2. Key to be returned
+parse_json_for_key () {
+  input=$1
+  key=$2
+
+  echo $input | sed -En "s/.*$key\":\"?([^\",}]+)\"?.*/\1/p"
+}
+
+request_new_auth_token () {
+  # NOTE: `echo` adds a newline! Remove it with `-n`
+  encoded_credentials=$(echo -n "$SPOTIFY_CLIENT_ID:$SPOTIFY_CLIENT_SECRET" | base64)
+
+  auth_json=$(curl \
+    --silent \
+    -X "POST" \
+    -H "Authorization: Basic $encoded_credentials" \
+    -d grant_type=client_credentials \
+    https://accounts.spotify.com/api/token
+  )
+
+  # Spotify returns a JSON object of the format:
+  #
+  #     {
+  #        "access_token": "NgCXRKc...MzYjw",
+  #        "token_type": "bearer",
+  #        "expires_in": 3600,
+  #     }
+  #
+  # Parse the `access_token` and `expires_in`, converting the latter to an
+  # actual epoch timestamp in the process.
+  access_token=$(parse_json_for_key $auth_json 'access_token')
+  expires_in=$(parse_json_for_key $auth_json 'expires_in')
+
+  expires_at=$((`date +%s` + $expires_in))
+
+  # Store the new credentials, also in JSON
+  json="{\"access_token\":\"$access_token\",\"expires_at\":$expires_at}"
+  echo $json > $CREDS_FILE
+
+  echo $json
+}
+
+read_credentials_file () {
+  # Check if file even exists
+  if [ ! -f "$CREDS_FILE" ]
+  then
+    return
+  fi
+
+  # Parse file
+  json=$(cat $CREDS_FILE)
+
+  # Check if token still valid
+  expires_at=$(parse_json_for_key $json 'expires_at')
+  now=$(date +%s)
+
+  if (($expires_at < $now))
+  then
+    return
+  fi
+
+  # If still valid, return the JSON
+  echo $json
+}
+
 # Usage / Help
 read -r -d '' usage << EOF
 \n
@@ -47,13 +116,15 @@ then
   exit 1
 fi
 
-# Test that values are set
+# Ensure dependencies exist
 
 if [ -z `which base64` ]
 then
   echo "Utility \`base64\` does not exist"
   exit 1
 fi
+
+# Test that values are set
 
 if [ -z "$SPOTIFY_CLIENT_ID" ]
 then
@@ -68,33 +139,42 @@ then
 fi
 
 #
-# Query for Auth Token
+# Get Auth Token
 #
 
-# NOTE: `echo` adds a newline! Remove it with `-n`
-encoded_credentials=$(echo -n "$SPOTIFY_CLIENT_ID:$SPOTIFY_CLIENT_SECRET" | base64)
+echo "Trying to read cached credentials from $CREDS_FILE..."
+json=$(read_credentials_file)
 
-echo "Querying for new auth token"
-auth_json=$(curl \
-  --silent \
-  -X "POST" \
-  -H "Authorization: Basic $encoded_credentials" \
-  -d grant_type=client_credentials \
-  https://accounts.spotify.com/api/token
-)
+if [ -z "$json" ]
+then
+  echo "Querying for new auth token"
+  json=$(request_new_auth_token)
+else
+  echo "Succesfully read cached credentials"
+fi
 
-# TODO: This is a terrible way to parse JSON -_-
-access_token=$(echo "$auth_json" | sed -En 's/.*access_token\":\"([^\"]+)\".*/\1/p')
-expires_at=$((`date +%s` + $(echo "$auth_json" | sed -En 's/.*expires_in\":([0-9]+),.*/\1/p')))
+if [ -z "$json" ]
+then
+  echo "Something went wrong, exiting"
+  exit 1
+fi
+
+access_token=$(parse_json_for_key $json 'access_token')
+
+if [ -z "$access_token" ]
+then
+  echo "Something went wrong, exiting"
+  exit 1
+fi
 
 #
-# Get data for track
+# Get data for each track
 #
 
 input_file=$1
 rm songs-*
 
-echo "Reading from $input_file"
+echo "Reading song list from $input_file"
 
 while read track; do
   id=$(echo "$track" | sed -En 's/https:\/\/open.spotify.com\/track\/(.*)$/\1/p')
@@ -109,7 +189,7 @@ while read track; do
   year=$(echo $release_date | sed -En 's/^([0-9]{4})\-.*/\1/p')
   filename="songs-$year.txt"
 
-  echo "$track -> $year"
+  echo -e "\t$track -> $year"
 
   echo $track >> $filename
 done < $input_file
