@@ -186,10 +186,25 @@ while read track; do
   )
 
   release_date=$(echo "$song_data" | sed -En 's/.*release_date\" ?: ?\"([^\"]+)\".*/\1/p')
-  year=$(echo $release_date | sed -En 's/^([0-9]{4})\-.*/\1/p')
+  year=$(echo $release_date | sed -En 's/^([0-9]{4}).*/\1/p')
   filename="songs-$year.txt"
 
-  echo -e "\t$track -> $year"
+  echo "$release_date,$track" >> $filename
 
-  echo $track >> $filename
+  echo -e "\t$track -> $release_date"
 done < $input_file
+
+#
+# Sort each file by release date
+#
+
+echo "Sorting files by release date"
+tempfile="songs.sorted"
+
+\ls songs-* | while read file
+do
+  cat $file | sort -k 1,1 | cut -d',' -f2 > $tempfile
+  cat $tempfile > $file
+done
+
+rm $tempfile
